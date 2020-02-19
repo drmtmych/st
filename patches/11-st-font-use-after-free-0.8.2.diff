@@ -1,0 +1,53 @@
+commit a8cb8e94547d7e31441d2444e8a196415e3e4c1f
+Author: magras <dr.magras@gmail.com>
+Date:   Thu Feb 28 04:56:01 2019 +0300
+
+    fix use after free in font caching algorithm
+    
+    Current font caching algorithm contains a use after free error. A font
+    removed from `frc` might be still listed in `wx.specbuf`. It will lead
+    to a crash inside `XftDrawGlyphFontSpec()`.
+    
+    Steps to reproduce:
+    $ st -f 'Misc Tamsyn:scalable=false'
+    $ curl https://www.cl.cam.ac.uk/~mgk25/ucs/examples/UTF-8-demo.txt
+    
+    Of course, result depends on fonts installed on a system and fontconfig.
+    In my case, I'm getting consistent segfaults with different fonts.
+    
+    I replaced a fixed array with a simple unbounded buffer with a constant
+    growth rate. Cache starts with a capacity of 0, gets increments by 16,
+    and never shrinks. On my machine after `cat UTF-8-demo.txt` buffer
+    reaches a capacity of 192. During casual use capacity stays at 0.
+
+diff --git a/x.c b/x.c
+index 865dacc..2cd76d0 100644
+--- a/x.c
++++ b/x.c
+@@ -225,8 +225,9 @@ typedef struct {
+ } Fontcache;
+ 
+ /* Fontcache is an array now. A new font will be appended to the array. */
+-static Fontcache frc[16];
++static Fontcache *frc = NULL;
+ static int frclen = 0;
++static int frccap = 0;
+ static char *usedfont = NULL;
+ static double usedfontsize = 0;
+ static double defaultfontsize = 0;
+@@ -1252,11 +1253,10 @@ xmakeglyphfontspecs(XftGlyphFontSpec *specs, const Glyph *glyphs, int len, int x
+ 
+ 			/*
+-			 * Overwrite or create the new cache entry.
++			 * Allocate memory for the new cache entry.
+ 			 */
+-			if (frclen >= LEN(frc)) {
+-				frclen = LEN(frc) - 1;
+-				XftFontClose(xw.dpy, frc[frclen].font);
+-				frc[frclen].unicodep = 0;
++			if (frclen >= frccap) {
++				frccap += 16;
++				frc = xrealloc(frc, frccap * sizeof(Fontcache));
+ 			}
+ 
+ 			frc[frclen].font = XftFontOpenPattern(xw.dpy,
